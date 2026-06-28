@@ -149,7 +149,7 @@ def make_heatmap(data: dict) -> str:
     TITLE_H = 0.06
     PAD = 0.01
 
-    ax = fig.add_axes([PAD, PAD, 1 - 2*PAD, 1 - TITLE_H - 2*PAD])
+    ax = fig.add_axes([PAD, PAD, 1 - 2*PAD, 1 - TITLE_H - PAD])
     ax.set_facecolor("black")
     ax.set_xlim(0, 1)
     ax.set_ylim(0, 1)
@@ -227,21 +227,7 @@ def make_heatmap(data: dict) -> str:
              ha="center", va="center",
              fontweight="bold")
 
-    # 图例
-    legend_data = [("跌>3%","black","white"), ("跌","#333","white"),
-                   ("平盘","#555","white"), ("涨","#ccc","black"), ("涨>3%","white","black")]
-    for li, (label, fc, tc) in enumerate(legend_data):
-        lx = 0.01 + li * 0.07
-        ly = 0.002
-        r = FancyBboxPatch((lx, ly), 0.06, 0.022,
-                           boxstyle="round,pad=0.001",
-                           linewidth=0.3, edgecolor="#444",
-                           facecolor=fc, transform=fig.transFigure)
-        fig.add_artist(r)
-        fig.text(lx+0.03, ly+0.011, label,
-                 fontsize=7, color=tc,
-                 ha="center", va="center",
-                 transform=fig.transFigure)
+
 
     tmp = str(IMAGE_PATH).replace(".png", "_raw.png")
     plt.savefig(tmp, dpi=100, bbox_inches="tight",
