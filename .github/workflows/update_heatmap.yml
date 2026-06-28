@@ -1,0 +1,42 @@
+name: Update Kindle Heatmap
+
+on:
+  schedule:
+    # 美东时间 收盘后 17:30 运行（UTC 22:30，夏令时；UTC 23:30，冬令时）
+    # 这里用 UTC 22:30，夏令时期间（3月-11月）刚好覆盖
+    - cron: "30 22 * * 1-5"   # 周一至周五
+    - cron: "30 23 * * 1-5"   # 冬令时补充（两次运行幂等，图片会覆盖）
+  workflow_dispatch:            # 允许手动触发
+
+permissions:
+  contents: write               # 需要写权限以 push 图片和 HTML
+
+jobs:
+  capture:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout 仓库
+        uses: actions/checkout@v4
+
+      - name: 安装 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 安装依赖
+        run: |
+          pip install playwright pillow
+          playwright install chromium
+          playwright install-deps chromium
+
+      - name: 运行截图脚本
+        run: python scripts/capture_heatmap.py
+
+      - name: 提交并推送更新
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add docs/
+          # 如果没有变化就跳过 commit（避免空提交报错）
+          git diff --cached --quiet || git commit -m "chore: update heatmap $(date -u +'%Y-%m-%d %H:%M UTC')"
+          git push
