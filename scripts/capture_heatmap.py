@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """
 capture_heatmap.py
-用 yfinance 拉取 Nasdaq-100 数据，生成适合 Kindle 墨水屏的灰度热力图。
+Nasdaq-100 热力图，适配 Kindle 墨水屏：
+- 涨：白底黑字 / 跌：黑底白字 / 平：灰底白字
+- 方块大小按市值权重（treemap squarified）
+- 字体放大，清晰易读
 """
 
 import time
@@ -17,213 +20,240 @@ from matplotlib.patches import FancyBboxPatch
 import numpy as np
 from PIL import Image, ImageEnhance, ImageOps, ImageFilter
 
-# ── 配置 ────────────────────────────────────────────────────────────────────
 OUTPUT_DIR = Path(__file__).parent.parent / "docs"
 IMAGE_PATH = OUTPUT_DIR / "heatmap.png"
 HTML_PATH  = OUTPUT_DIR / "index.html"
 
-# Nasdaq-100 成分股（按板块分组）
-SECTORS = {
-    "Technology": [
-        "AAPL","MSFT","NVDA","AVGO","AMD","QCOM","TXN","MU","AMAT","LRCX",
-        "KLAC","MRVL","ADI","INTC","ASML","CSCO","ANET","CDNS","SNPS","ADBE"
-    ],
-    "Communication": [
-        "GOOGL","GOOG","META","NFLX","TMUS","CMCSA"
-    ],
-    "Consumer": [
-        "AMZN","TSLA","SBUX","BKNG","MAR","ABNB","ORLY","AZO","CPRT","DLTR"
-    ],
-    "Healthcare": [
-        "AMGN","GILD","VRTX","REGN","ISRG","DXCM","ILMN","MRNA","BIIB","IDXX"
-    ],
-    "Industrials": [
-        "HON","PDD","CTAS","FAST","ODFL","VRSK","DDOG","ZS","PANW","CRWD"
-    ],
-    "Other": [
-        "COST","PEP","WBD","KDP","MNST","FANG","CEG","BKR","EXC","XEL"
-    ],
-}
+# Nasdaq-100 成分股，附带近似市值权重（越大方块越大）
+# 格式: (ticker, 相对权重)
+STOCKS = [
+    # Technology
+    ("AAPL",  13.0), ("MSFT", 12.5), ("NVDA", 11.0), ("AVGO",  4.0),
+    ("ASML",   2.0), ("AMD",   2.0), ("QCOM",  1.8), ("TXN",   1.5),
+    ("MU",     1.5), ("AMAT",  1.4), ("LRCX",  1.2), ("KLAC",  1.1),
+    ("ADI",    1.1), ("INTC",  0.9), ("MRVL",  0.9), ("CDNS",  0.9),
+    ("SNPS",   0.9), ("ADBE",  1.8), ("CSCO",  1.8), ("ANET",  1.2),
+    # Communication
+    ("GOOGL",  5.0), ("GOOG",  2.5), ("META",  5.5), ("NFLX",  2.8),
+    ("TMUS",   1.5), ("CMCSA", 1.2),
+    # Consumer
+    ("AMZN",   8.0), ("TSLA",  4.5), ("BKNG",  1.5), ("MAR",   0.8),
+    ("SBUX",   0.8), ("ABNB",  0.8), ("ORLY",  0.9), ("AZO",   0.8),
+    ("CPRT",   0.7), ("DLTR",  0.5),
+    # Healthcare
+    ("AMGN",   1.5), ("GILD",  1.0), ("VRTX",  1.2), ("REGN",  1.0),
+    ("ISRG",   1.3), ("DXCM",  0.6), ("ILMN",  0.4), ("MRNA",  0.5),
+    ("BIIB",   0.5), ("IDXX",  0.5),
+    # Industrials / Others
+    ("HON",    1.2), ("CTAS",  0.8), ("FAST",  0.7), ("ODFL",  0.6),
+    ("VRSK",   0.7), ("DDOG",  0.9), ("ZS",    0.7), ("PANW",  1.2),
+    ("CRWD",   1.1), ("PDD",   1.5),
+    # More
+    ("COST",   2.5), ("PEP",   1.5), ("WBD",   0.5), ("KDP",   0.5),
+    ("MNST",   0.6), ("FANG",  0.5), ("CEG",   0.6), ("BKR",   0.5),
+    ("EXC",    0.5), ("XEL",   0.4),
+]
 
-ALL_TICKERS = [t for tickers in SECTORS.values() for t in tickers]
+ALL_TICKERS = [s[0] for s in STOCKS]
 
-# ── 拉取数据 ─────────────────────────────────────────────────────────────────
+# ── 拉取数据 ──────────────────────────────────────────────────────────────────
 def fetch_data():
     print("正在从 Yahoo Finance 拉取数据...")
     raw = yf.download(
-        ALL_TICKERS,
-        period="2d",
-        interval="1d",
-        group_by="ticker",
-        auto_adjust=True,
-        progress=False,
-        threads=True,
+        ALL_TICKERS, period="2d", interval="1d",
+        group_by="ticker", auto_adjust=True,
+        progress=False, threads=True,
     )
-
     results = {}
     for ticker in ALL_TICKERS:
         try:
-            if ticker in raw.columns.get_level_values(0):
+            try:
                 closes = raw[ticker]["Close"].dropna()
-            else:
+            except Exception:
                 closes = raw["Close"][ticker].dropna()
             if len(closes) >= 2:
                 pct = (closes.iloc[-1] - closes.iloc[-2]) / closes.iloc[-2] * 100
                 results[ticker] = float(pct)
-            elif len(closes) == 1:
+            else:
                 results[ticker] = 0.0
         except Exception as e:
             print(f"  [warn] {ticker}: {e}")
             results[ticker] = 0.0
-
     print(f"  获取到 {len(results)} 只股票数据")
     return results
 
+# ── Squarified Treemap ────────────────────────────────────────────────────────
+def squarify(sizes, x, y, w, h):
+    """返回 [(x, y, w, h), ...] 列表，按 squarified treemap 算法排列。"""
+    sizes = np.array(sizes, dtype=float)
+    total = sizes.sum()
+    if total == 0 or len(sizes) == 0:
+        return []
+    sizes = sizes / total * (w * h)
+
+    rects = []
+    _squarify(list(sizes), x, y, w, h, rects)
+    return rects
+
+def _worst(row, w):
+    s = sum(row)
+    if s == 0:
+        return float('inf')
+    return max(max(r for r in row) * w * w / s / s,
+               s * s / min(r for r in row) / w / w)
+
+def _squarify(sizes, x, y, w, h, rects):
+    if not sizes:
+        return
+    if len(sizes) == 1:
+        rects.append((x, y, w, h))
+        return
+
+    total = sum(sizes)
+    short = min(w, h)
+    row = []
+    remaining = list(sizes)
+
+    while remaining:
+        candidate = row + [remaining[0]]
+        if row and _worst(candidate, short) > _worst(row, short):
+            break
+        row = candidate
+        remaining.pop(0)
+
+    row_sum = sum(row)
+    if w >= h:
+        row_w = row_sum / total * w
+        cy = y
+        for r in row:
+            ch = r / row_sum * h
+            rects.append((x, cy, row_w, ch))
+            cy += ch
+        _squarify(remaining, x + row_w, y, w - row_w, h, rects)
+    else:
+        row_h = row_sum / total * h
+        cx = x
+        for r in row:
+            cw = r / row_sum * w
+            rects.append((cx, y, cw, row_h))
+            cx += cw
+        _squarify(remaining, x, y + row_h, w, h - row_h, rects)
+
 # ── 生成热力图 ────────────────────────────────────────────────────────────────
 def make_heatmap(data: dict) -> str:
-    # Kindle 8 横屏：1448×1072，留边距
+    # 1448×1072 Kindle，dpi=100 → 14.48×10.72 inches
     fig_w, fig_h = 14.48, 10.72
-    fig, ax = plt.subplots(figsize=(fig_w, fig_h), facecolor="black")
+    fig = plt.figure(figsize=(fig_w, fig_h), facecolor="black")
+
+    # 留顶部给标题
+    TITLE_H = 0.06
+    PAD = 0.01
+
+    ax = fig.add_axes([PAD, PAD, 1 - 2*PAD, 1 - TITLE_H - 2*PAD])
     ax.set_facecolor("black")
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
     ax.axis("off")
 
-    n_sectors = len(SECTORS)
-    cols = 3
-    rows = (n_sectors + cols - 1) // cols
+    # 按权重排列（大→小）
+    stock_weights = []
+    for ticker, weight in STOCKS:
+        stock_weights.append((ticker, weight))
+    stock_weights.sort(key=lambda x: -x[1])
 
-    sector_list = list(SECTORS.items())
-    cell_w = 1.0 / cols
-    cell_h = 0.92 / rows  # 留顶部空间给标题
+    tickers_sorted = [t for t, _ in stock_weights]
+    weights_sorted = [w for _, w in stock_weights]
 
-    for idx, (sector_name, tickers) in enumerate(sector_list):
-        row = idx // cols
-        col = idx % cols
+    rects = squarify(weights_sorted, 0, 0, 1, 1)
 
-        x0 = col * cell_w + 0.01
-        y0 = 0.96 - (row + 1) * cell_h + 0.005
-        w  = cell_w - 0.015
-        h  = cell_h - 0.01
+    for i, (ticker, (rx, ry, rw, rh)) in enumerate(zip(tickers_sorted, rects)):
+        pct = data.get(ticker, 0.0)
 
-        # 板块标题
-        ax.text(
-            x0 + w / 2, y0 + h + 0.003,
-            sector_name.upper(),
+        # 颜色逻辑
+        THRESH = 0.15
+        if pct > THRESH:
+            face_color = "white"
+            text_color = "black"
+        elif pct < -THRESH:
+            face_color = "black"
+            text_color = "white"
+        else:
+            face_color = "#555555"
+            text_color = "white"
+
+        GAP = 0.002
+        rect = FancyBboxPatch(
+            (rx + GAP, ry + GAP),
+            rw - 2*GAP, rh - 2*GAP,
+            boxstyle="round,pad=0.001",
+            linewidth=0.4,
+            edgecolor="#222222",
+            facecolor=face_color,
             transform=ax.transAxes,
-            fontsize=6, color="#aaaaaa",
-            ha="center", va="bottom",
-            fontweight="bold",
         )
+        ax.add_patch(rect)
 
-        # 在板块内均匀排列股票方块
-        valid = [t for t in tickers if t in data]
-        if not valid:
-            continue
+        # 字体大小：根据方块面积动态计算
+        area = rw * rh
+        base = np.sqrt(area) * 90
+        fs_ticker = np.clip(base, 5, 26)
+        fs_pct    = np.clip(base * 0.65, 4, 18)
 
-        n = len(valid)
-        sub_cols = min(n, int(np.ceil(np.sqrt(n * w / h))))
-        sub_rows = int(np.ceil(n / sub_cols))
+        cx = rx + rw / 2
+        cy = ry + rh / 2
 
-        sw = w / sub_cols
-        sh = h / sub_rows
-
-        for i, ticker in enumerate(valid):
-            sc = i % sub_cols
-            sr = i // sub_cols
-
-            pct = data[ticker]
-            # 灰度映射：跌→深灰/黑，平→中灰，涨→浅灰/白
-            # 范围约 -5% ~ +5%
-            norm = np.clip(pct / 5.0, -1, 1)
-            # -1→0.05(黑), 0→0.45(中灰), +1→0.92(白)
-            gray = 0.45 + norm * 0.45
-            gray = float(np.clip(gray, 0.05, 0.95))
-
-            bx = x0 + sc * sw
-            by = y0 + (sub_rows - 1 - sr) * sh
-
-            rect = FancyBboxPatch(
-                (bx + 0.002, by + 0.002),
-                sw - 0.004, sh - 0.004,
-                boxstyle="round,pad=0.001",
-                linewidth=0.3,
-                edgecolor="#333333",
-                facecolor=(gray, gray, gray),
-                transform=ax.transAxes,
-            )
-            ax.add_patch(rect)
-
-            # 文字：大方块显示 ticker + 涨跌幅，小方块只显示 ticker
-            font_size = min(sw * fig_w * 6, sh * fig_h * 6, 9)
-            text_color = "black" if gray > 0.55 else "white"
-
-            cx = bx + sw / 2
-            cy = by + sh / 2
-
-            if font_size >= 5:
-                ax.text(
-                    cx, cy + sh * 0.08,
+        if fs_ticker >= 5:
+            ax.text(cx, cy + rh * 0.1,
                     ticker,
                     transform=ax.transAxes,
-                    fontsize=max(font_size, 4.5),
+                    fontsize=fs_ticker,
                     color=text_color,
                     ha="center", va="center",
-                    fontweight="bold",
-                )
-                if font_size >= 6:
-                    ax.text(
-                        cx, cy - sh * 0.18,
-                        f"{pct:+.1f}%",
+                    fontweight="bold")
+            if fs_pct >= 4.5:
+                ax.text(cx, cy - rh * 0.15,
+                        f"{pct:+.2f}%",
                         transform=ax.transAxes,
-                        fontsize=max(font_size * 0.75, 3.5),
+                        fontsize=fs_pct,
                         color=text_color,
-                        ha="center", va="center",
-                    )
+                        ha="center", va="center")
 
     # 标题
     et = timezone(timedelta(hours=-5))
     now_str = datetime.now(et).strftime("%Y-%m-%d %H:%M ET")
-    ax.text(
-        0.5, 0.985,
-        f"Nasdaq-100  |  {now_str}",
-        transform=ax.transAxes,
-        fontsize=9, color="#cccccc",
-        ha="center", va="top",
-    )
+    fig.text(0.5, 1 - TITLE_H/2,
+             f"Nasdaq-100  ·  {now_str}",
+             fontsize=16, color="white",
+             ha="center", va="center",
+             fontweight="bold")
 
     # 图例
-    legend_items = [
-        (-4, "跌>4%"), (-2, "-2%"), (0, "平盘"), (2, "+2%"), (4, "涨>4%")
-    ]
-    for li, (pct_val, label) in enumerate(legend_items):
-        norm = np.clip(pct_val / 5.0, -1, 1)
-        gray = float(np.clip(0.45 + norm * 0.45, 0.05, 0.95))
-        lx = 0.02 + li * 0.07
-        rect = FancyBboxPatch(
-            (lx, 0.002), 0.055, 0.018,
-            boxstyle="round,pad=0.001",
-            linewidth=0.3,
-            edgecolor="#555",
-            facecolor=(gray, gray, gray),
-            transform=ax.transAxes,
-        )
-        ax.add_patch(rect)
-        tc = "black" if gray > 0.55 else "white"
-        ax.text(lx + 0.0275, 0.011, label,
-                transform=ax.transAxes,
-                fontsize=4.5, color=tc, ha="center", va="center")
+    legend_data = [("跌>3%","black","white"), ("跌","#333","white"),
+                   ("平盘","#555","white"), ("涨","#ccc","black"), ("涨>3%","white","black")]
+    for li, (label, fc, tc) in enumerate(legend_data):
+        lx = 0.01 + li * 0.07
+        ly = 0.002
+        r = FancyBboxPatch((lx, ly), 0.06, 0.022,
+                           boxstyle="round,pad=0.001",
+                           linewidth=0.3, edgecolor="#444",
+                           facecolor=fc, transform=fig.transFigure)
+        fig.add_artist(r)
+        fig.text(lx+0.03, ly+0.011, label,
+                 fontsize=7, color=tc,
+                 ha="center", va="center",
+                 transform=fig.transFigure)
 
-    plt.tight_layout(pad=0)
     tmp = str(IMAGE_PATH).replace(".png", "_raw.png")
     plt.savefig(tmp, dpi=100, bbox_inches="tight",
-                facecolor="black", pad_inches=0.05)
+                facecolor="black", pad_inches=0)
     plt.close()
     return tmp
 
-# ── 墨水屏后处理 ─────────────────────────────────────────────────────────────
+# ── 墨水屏后处理 ──────────────────────────────────────────────────────────────
 def process_for_eink(src: str):
     img = Image.open(src).convert("L")
-    img = ImageOps.autocontrast(img, cutoff=1)
-    img = ImageEnhance.Contrast(img).enhance(1.4)
+    img = ImageOps.autocontrast(img, cutoff=0)
+    img = ImageEnhance.Contrast(img).enhance(1.3)
     img = img.filter(ImageFilter.SHARPEN)
     img.save(IMAGE_PATH, "PNG", optimize=True)
     print(f"[ok] 图片已保存: {IMAGE_PATH}")
@@ -250,7 +280,7 @@ def write_html():
 </head>
 <body>
   <img src="heatmap.png?t={ts}" alt="Nasdaq 100 Heatmap">
-  <p>更新：{now_str} ET &nbsp;·&nbsp; 数据来源：Yahoo Finance</p>
+  <p>更新：{now_str} ET · 数据来源：Yahoo Finance</p>
 </body>
 </html>"""
     HTML_PATH.write_text(html, encoding="utf-8")
